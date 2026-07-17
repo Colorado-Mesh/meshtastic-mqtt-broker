@@ -9,9 +9,12 @@ using Microsoft.Extensions.Hosting;
 using Serilog.Formatting.Compact;
 using Meshtastic.Crypto;
 using Meshtastic;
-using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
-using System.Reflection;
+
+const string usernameKey = "MQTT_USERNAME";
+const string passwordKey = "MQTT_PASSWORD";
+// Call once to save on memory
+var username = GetUsername();
+var password = GetPassword();
 
 await RunMqttServer(args);
 
@@ -40,24 +43,10 @@ async Task RunMqttServer(string[] args)
 
 MqttServerOptions BuildMqttServerOptions()
 {
-    var currentPath = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location)!;
-
-    #pragma warning disable SYSLIB0057 // Type or member is obsolete
-    var certificate = new X509Certificate2(
-        Path.Combine(currentPath, "certificate.pfx"),
-        "large4cats",
-        X509KeyStorageFlags.Exportable);
-    #pragma warning restore SYSLIB0057
-
     var options = new MqttServerOptionsBuilder()
         .WithoutDefaultEndpoint()
-        .WithEncryptedEndpoint()
-        .WithEncryptedEndpointPort(8883)
-        .WithEncryptionCertificate(certificate.Export(X509ContentType.Pfx))
-        .WithEncryptionSslProtocol(SslProtocols.Tls12)
         .Build();
 
-    Log.Logger.Information("Using SSL certificate for MQTT server");
     return options;
 }
 
@@ -70,11 +59,12 @@ void ConfigureMqttServer(MqttServer mqttServer)
 
 async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 {
-    try 
+    try
     {
         if (args.ApplicationMessage.Payload.Length == 0)
         {
-            Log.Logger.Warning("Received empty payload on topic {@Topic} from {@ClientId}", args.ApplicationMessage.Topic, args.ClientId);
+            Log.Logger.Warning("Received empty payload on topic {@Topic} from {@ClientId}",
+                args.ApplicationMessage.Topic, args.ClientId);
             args.ProcessPublish = false;
             return;
         }
@@ -83,7 +73,8 @@ async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 
         if (!IsValidServiceEnvelope(serviceEnvelope))
         {
-            Log.Logger.Warning("Service envelope or packet is malformed. Blocking packet on topic {@Topic} from {@ClientId}",
+            Log.Logger.Warning(
+                "Service envelope or packet is malformed. Blocking packet on topic {@Topic} from {@ClientId}",
                 args.ApplicationMessage.Topic, args.ClientId);
             args.ProcessPublish = false;
             return;
@@ -95,12 +86,12 @@ async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
         var data = DecryptMeshPacket(serviceEnvelope);
 
         // Uncomment to block unrecognized packets
-        // if (data == null)
-        // {
-        //     Log.Logger.Warning("Service envelope does not contain a valid packet. Blocking packet");
-        //     args.ProcessPublish = false;
-        //     return;
-        // }
+        if (data == null)
+        {
+            Log.Logger.Warning("Service envelope does not contain a valid packet. Blocking packet");
+            args.ProcessPublish = false;
+            return;
+        }
 
         LogReceivedMessage(args.ApplicationMessage.Topic, args.ClientId, data);
         args.ProcessPublish = true;
@@ -127,21 +118,25 @@ Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
 
 Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
 {
-    // Add connection / authentication logic here if needed
+    if (args.UserName != username || args.Password != password)
+    {
+        args.ReasonCode = MqttConnectReasonCode.BadUserNameOrPassword;
+    }
+
     args.ReasonCode = MqttConnectReasonCode.Success;
     return Task.CompletedTask;
 }
 
 bool IsValidServiceEnvelope(ServiceEnvelope serviceEnvelope)
 {
-    return !(String.IsNullOrWhiteSpace(serviceEnvelope.ChannelId) ||
-            String.IsNullOrWhiteSpace(serviceEnvelope.GatewayId) ||
-            serviceEnvelope.Packet == null ||
-            serviceEnvelope.Packet.Id < 1 ||
-            serviceEnvelope.Packet.From < 1 ||
-            serviceEnvelope.Packet.Encrypted == null ||
-            serviceEnvelope.Packet.Encrypted.Length < 1 ||
-            serviceEnvelope.Packet.Decoded != null);
+    return !(string.IsNullOrWhiteSpace(serviceEnvelope.ChannelId) ||
+             string.IsNullOrWhiteSpace(serviceEnvelope.GatewayId) ||
+             serviceEnvelope.Packet == null ||
+             serviceEnvelope.Packet.Id < 1 ||
+             serviceEnvelope.Packet.From < 1 ||
+             serviceEnvelope.Packet.Encrypted == null ||
+             serviceEnvelope.Packet.Encrypted.Length < 1 ||
+             serviceEnvelope.Packet.Decoded != null);
 }
 
 void LogReceivedMessage(string topic, string clientId, Data? data)
@@ -153,7 +148,7 @@ void LogReceivedMessage(string topic, string clientId, Data? data)
     }
     else
     {
-        Log.Logger.Information("Received packet on topic {@Topic} from {@ClientId} with port number: {@Portnum}",
+        Log.Logger.Information("Received packet on topic {@Topic} from {@ClientId} with port number: {@PortNumber}",
             topic, clientId, data?.Portnum);
     }
 }
@@ -161,7 +156,8 @@ void LogReceivedMessage(string topic, string clientId, Data? data)
 static Data? DecryptMeshPacket(ServiceEnvelope serviceEnvelope)
 {
     var nonce = new NonceGenerator(serviceEnvelope.Packet.From, serviceEnvelope.Packet.Id).Create();
-    var decrypted = PacketEncryption.TransformPacket(serviceEnvelope.Packet.Encrypted.ToByteArray(), nonce, Resources.DEFAULT_PSK);
+    var decrypted =
+        PacketEncryption.TransformPacket(serviceEnvelope.Packet.Encrypted.ToByteArray(), nonce, Resources.DEFAULT_PSK);
     var payload = Data.Parser.ParseFrom(decrypted);
 
     if (payload.Portnum > PortNum.UnknownApp && payload.Payload.Length > 0)
@@ -197,8 +193,20 @@ static IHostBuilder CreateHostBuilder(string[] args)
 {
     return Host.CreateDefaultBuilder(args)
         .UseConsoleLifetime()
-        .ConfigureServices((hostContext, services) =>
-        {
-            services.AddSingleton(Console.Out);
-        });
+        .ConfigureServices((hostContext, services) => { services.AddSingleton(Console.Out); });
+}
+
+string? GetUsername()
+{
+    return GetEnvironmentalVariable(usernameKey);
+}
+
+string? GetPassword()
+{
+    return GetEnvironmentalVariable(passwordKey);
+}
+
+string? GetEnvironmentalVariable(string name)
+{
+    return Environment.GetEnvironmentVariable(name);
 }

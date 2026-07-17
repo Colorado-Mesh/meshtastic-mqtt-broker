@@ -15,7 +15,7 @@ WORKDIR /app
 COPY --from=build /app ./
 
 # Expose ports
-EXPOSE 1883 8883
+EXPOSE 1883
 
 # Set environment variable to control SSL mode
 # ENV SSL=true  # Uncomment to enable SSL by default

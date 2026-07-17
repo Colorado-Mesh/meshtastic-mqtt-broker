@@ -16,6 +16,13 @@ const string passwordKey = "MQTT_PASSWORD";
 var username = GetUsername();
 var password = GetPassword();
 
+// Block # and $SYS subscriptions
+string[] blockedTopics =
+[
+    "#",
+    "$SYS"
+];
+
 await RunMqttServer(args);
 
 async Task RunMqttServer(string[] args)
@@ -111,8 +118,17 @@ async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 
 Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
 {
-    // Add filtering logic here if needed
-    args.ProcessSubscription = true;
+    // Check for blocked topics
+    if (blockedTopics.Contains(args.TopicFilter.Topic))
+    { 
+        args.Response.ReasonCode = MqttSubscribeReasonCode.NotAuthorized;
+        args.ProcessSubscription = false;
+    }
+    else
+    {
+        args.ProcessSubscription = true;
+    }
+    
     return Task.CompletedTask;
 }
 
@@ -122,8 +138,11 @@ Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
     {
         args.ReasonCode = MqttConnectReasonCode.BadUserNameOrPassword;
     }
-
-    args.ReasonCode = MqttConnectReasonCode.Success;
+    else
+    {
+        args.ReasonCode = MqttConnectReasonCode.Success;
+    }
+    
     return Task.CompletedTask;
 }
 

@@ -1,0 +1,10 @@
+services:
+  meshtastic_mqtt:
+    container_name: "MeshtasticMQTT"
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./on_host/config.yaml:/data/config.yaml:ro

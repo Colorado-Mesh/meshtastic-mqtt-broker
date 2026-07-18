@@ -1,0 +1,8 @@
+Broker:
+  Username: me
+  Password: me2
+  AllowedTopicPaths:
+    - 'msh/US/CO/'
+  BlockedTopicPaths:
+    - "#"
+    - '$SYS'

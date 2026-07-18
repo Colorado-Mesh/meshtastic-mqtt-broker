@@ -9,19 +9,12 @@ using Microsoft.Extensions.Hosting;
 using Serilog.Formatting.Compact;
 using Meshtastic.Crypto;
 using Meshtastic;
+using YamlDotNet.Serialization;
+using YamlDotNet.Serialization.NamingConventions;
 
-const string usernameKey = "MQTT_USERNAME";
-const string passwordKey = "MQTT_PASSWORD";
-// Call once to save on memory
-var username = GetUsername();
-var password = GetPassword();
+const string configFilePath = "/data/config.yaml";
 
-// Block # and $SYS subscriptions
-string[] blockedTopics =
-[
-    "#",
-    "$SYS"
-];
+var config = LoadConfigurationFromFile(configFilePath);
 
 await RunMqttServer(args);
 
@@ -118,23 +111,30 @@ async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 
 Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
 {
-    // Check for blocked topics
-    if (blockedTopics.Contains(args.TopicFilter.Topic))
-    { 
+    args.ProcessSubscription = true;
+
+    // Check if it does NOT match an allowed topic partial path
+    if (config.Broker.AllowedTopicPaths.Count > 0 &&
+        !config.Broker.AllowedTopicPaths.Any(s => args.TopicFilter.Topic.StartsWith(s)))
+    {
         args.Response.ReasonCode = MqttSubscribeReasonCode.NotAuthorized;
         args.ProcessSubscription = false;
     }
-    else
+
+    // Check if it matches a blocked topic
+    if (config.Broker.BlockedTopicPaths.Count > 0 &&
+        config.Broker.BlockedTopicPaths.Any(s => args.TopicFilter.Topic.StartsWith(s)))
     {
-        args.ProcessSubscription = true;
+        args.Response.ReasonCode = MqttSubscribeReasonCode.NotAuthorized;
+        args.ProcessSubscription = false;
     }
-    
+
     return Task.CompletedTask;
 }
 
 Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
 {
-    if (args.UserName != username || args.Password != password)
+    if (args.UserName != config.Broker.Username || args.Password != config.Broker.Password)
     {
         args.ReasonCode = MqttConnectReasonCode.BadUserNameOrPassword;
     }
@@ -142,7 +142,7 @@ Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
     {
         args.ReasonCode = MqttConnectReasonCode.Success;
     }
-    
+
     return Task.CompletedTask;
 }
 
@@ -215,17 +215,31 @@ static IHostBuilder CreateHostBuilder(string[] args)
         .ConfigureServices((hostContext, services) => { services.AddSingleton(Console.Out); });
 }
 
-string? GetUsername()
+static Configuration LoadConfigurationFromFile(string filePath)
 {
-    return GetEnvironmentalVariable(usernameKey);
+    if (!File.Exists(filePath))
+    {
+        throw new Exception("Config file path not found.");
+    }
+
+    var contents = File.ReadAllText(filePath);
+
+    var deserializer = new DeserializerBuilder()
+        .WithNamingConvention(PascalCaseNamingConvention.Instance)
+        .Build();
+
+    return deserializer.Deserialize<Configuration>(contents);
 }
 
-string? GetPassword()
+public class Configuration
 {
-    return GetEnvironmentalVariable(passwordKey);
+    public MqttBrokerConfiguration Broker { get; set; }
 }
 
-string? GetEnvironmentalVariable(string name)
+public class MqttBrokerConfiguration
 {
-    return Environment.GetEnvironmentVariable(name);
+    public string Username { get; set; }
+    public string Password { get; set; }
+    public List<string> AllowedTopicPaths { get; set; }
+    public List<string> BlockedTopicPaths { get; set; }
 }

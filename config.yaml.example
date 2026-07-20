@@ -1,9 +1,15 @@
 Broker:
-  Username: me
-  Password: me2
-  AllowedTopicPaths:
-    - 'msh/US/CO/'
-  # Checks allowed first, so blocks only need to be subset of allowed if allowed is set
-  BlockedTopicPaths:
-    - "#"
-    - '$SYS'
+  Users:
+    - Username: user
+      Password: password
+      AllowedTopicPaths:
+        - 'msh/US/CO/'
+      # Checks allowed first, so blocks only need to be subset of allowed if allowed is set
+      BlockedTopicPaths:
+        - "#"
+        - '$SYS'
+    - Username: admin
+      Password: admin
+      AllowedTopicPaths:
+        - '#'
+      

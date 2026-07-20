@@ -13,17 +13,35 @@ using Meshtastic.Mqtt;
 using CommandLine;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
+using User = Meshtastic.Mqtt.User;
 
 Configuration config = null!;
+
+var userCache = new Dictionary<string, User>();
+
 
 // Entrypoint
 await RunMqttServer(args);
 return;
 
+User GetUserFromCache(string username)
+{
+    var hash = User.GetHash(username);
+    return !userCache.TryGetValue(hash, out var user)
+        ? throw new UserCacheException($"Could not load user {username} from cache")
+        : user;
+}
+
+void SaveUserToCache(User user)
+{
+    var hash = user.GetHash();
+    userCache.Add(hash, user);
+}
+
 async Task RunMqttServer(string[] args)
 {
     string? logsFolder = null;
-    
+
     _ = CommandLine.Parser.Default.ParseArguments<CommandLineArguments>(args)
         .MapResult(commandLineArguments =>
             {
@@ -32,30 +50,31 @@ async Task RunMqttServer(string[] args)
                 return 0;
             },
             errors => throw new Exception("Could not load settings."));
-    
+
     Log.Logger = new LoggerConfiguration()
         .MinimumLevel.Debug()
         .WriteTo.Console(new RenderedCompactJsonFormatter())
-        .WriteTo.File(new RenderedCompactJsonFormatter(), Path.Combine(logsFolder!, "log.json"), rollingInterval: RollingInterval.Hour)
+        .WriteTo.File(new RenderedCompactJsonFormatter(), Path.Combine(logsFolder!, "log.json"),
+            rollingInterval: RollingInterval.Hour)
         .CreateLogger();
-    
+
     using var mqttServer = new MqttServerFactory()
         .CreateMqttServer(BuildMqttServerOptions());
     ConfigureMqttServer(mqttServer);
-    
+
     using var host = CreateHostBuilder(args).Build();
     await host.StartAsync();
     var lifetime = host.Services.GetRequiredService<IHostApplicationLifetime>();
 
     await mqttServer.StartAsync();
-    
+
     await SetupGracefulShutdown(mqttServer, lifetime, host);
 }
 
 MqttServerOptions BuildMqttServerOptions()
 {
     var options = new MqttServerOptionsBuilder()
-        .WithDefaultEndpoint()  //  I wasted countless hours because this line was Without instead of With...
+        .WithDefaultEndpoint() //  I wasted countless hours because this line was Without instead of With...
         .Build();
 
     return options;
@@ -70,6 +89,8 @@ void ConfigureMqttServer(MqttServer mqttServer)
 
 async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 {
+    // No user checking on publish
+
     try
     {
         if (args.ApplicationMessage.Payload.Length == 0)
@@ -122,35 +143,36 @@ async Task HandleInterceptingPublish(InterceptingPublishEventArgs args)
 
 Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
 {
-    args.ProcessSubscription = true;
-
     var clientId = args.ClientId;
+    User user;
 
-    // Check if it does NOT match an allowed topic partial path
-    if (config.Broker.AllowedTopicPaths.Count > 0 &&
-        !config.Broker.AllowedTopicPaths.Any(s => args.TopicFilter.Topic.StartsWith(s)))
+    try
     {
-        Log.Logger.Warning("Failed subscription attempt by {@ClientId} on blocked topic {@Topic}",
-            clientId, args.TopicFilter.Topic);
+        user = GetUserFromCache(args.UserName);
+    }
+    catch (UserCacheException)
+    {
+        Log.Logger.Warning("Failed to determine authenticated user with username {@Username}",
+            args.UserName);
+        args.Response.ReasonCode = MqttSubscribeReasonCode.UnspecifiedError;
+        args.ProcessSubscription = false;
+        return Task.CompletedTask;
+    }
+
+    if (!user.AllowedToSubscribe(args.TopicFilter.Topic))
+    {
+        Log.Logger.Warning(
+            "Failed subscription attempt by {@ClientId} (username: {@Username}) on blocked topic {@Topic}",
+            clientId, args.UserName, args.TopicFilter.Topic);
         args.Response.ReasonCode = MqttSubscribeReasonCode.NotAuthorized;
         args.ProcessSubscription = false;
+        return Task.CompletedTask;
     }
 
-    // Check if it matches a blocked topic
-    if (config.Broker.BlockedTopicPaths.Count > 0 &&
-        config.Broker.BlockedTopicPaths.Any(s => args.TopicFilter.Topic.StartsWith(s)))
-    {
-        Log.Logger.Warning("Failed subscription attempt by {@ClientId} on blocked topic {@Topic}",
-            clientId, args.TopicFilter.Topic);
-        args.Response.ReasonCode = MqttSubscribeReasonCode.NotAuthorized;
-        args.ProcessSubscription = false;
-    }
+    Log.Logger.Information("Successful subscription attempt by {@ClientId} (username: {@Username}) on topic {@Topic}",
+        clientId, args.UserName, args.TopicFilter.Topic);
 
-    if (args.ProcessSubscription)
-    {
-        Log.Logger.Information("Successful subscription attempt by {@ClientId} on topic {@Topic}",
-            clientId, args.TopicFilter.Topic);
-    }
+    args.ProcessSubscription = true;
 
     return Task.CompletedTask;
 }
@@ -158,18 +180,23 @@ Task HandleInterceptingSubscription(InterceptingSubscriptionEventArgs args)
 Task HandleValidatingConnection(ValidatingConnectionEventArgs args)
 {
     var clientId = args.ClientId;
-    
-    if (args.UserName != config.Broker.Username || args.Password != config.Broker.Password)
+
+    // Look up and cache authenticating user
+    try
+    {
+        var user = config.GetUser(username: args.UserName, password: args.Password);
+        SaveUserToCache(user);
+
+        Log.Logger.Information("Successful login attempt by {@ClientId} (username: {@Username})",
+            clientId, args.UserName);
+        args.ReasonCode = MqttConnectReasonCode.Success;
+    }
+    catch
     {
         Log.Logger.Warning("Failed login attempt by {@ClientId} (username: {@Username})",
             clientId, args.UserName);
+
         args.ReasonCode = MqttConnectReasonCode.BadUserNameOrPassword;
-    }
-    else
-    {
-        Log.Logger.Information("Successful login attempt by {@ClientId}",
-            clientId);
-        args.ReasonCode = MqttConnectReasonCode.Success;
     }
 
     return Task.CompletedTask;
@@ -232,7 +259,7 @@ async Task SetupGracefulShutdown(MqttServer mqttServer, IHostApplicationLifetime
     await mqttServer.StopAsync();
     Thread.Sleep(500);
     ended.Set();
-    
+
     lifetime.StopApplication();
     await host.WaitForShutdownAsync();
 }

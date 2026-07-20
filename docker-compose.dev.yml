@@ -7,4 +7,5 @@ services:
     ports:
       - "1883:1883"
     volumes:
+      - ./on_host/logs:/data/logs:rw
       - ./on_host/config.yaml:/data/config.yaml:ro

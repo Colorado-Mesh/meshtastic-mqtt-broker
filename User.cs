@@ -18,6 +18,12 @@ public class User(string username, string password, List<string> allowedTopicPat
 
     internal bool AllowedToSubscribe(string topic)
     {
+        // Shortcut, user is allowed to sub to any $SYS
+        if (topic == "$SYS" && AllowedTopicPaths.Contains("$SYS"))
+        {
+            return true;
+        }
+        
         // Shortcut, user is allowed to sub to anything
         if (AllowedTopicPaths.Contains("#"))
         {
